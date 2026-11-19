@@ -1,79 +1,124 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// NOVA BAY — screenshot scenes: stage the world for each of the 4
+// screenshots (?shot=cover|shootout|race|aerial&seed=1), then tell the
+// screenshot driver the frame is ready. One job: make every screenshot
+// show several systems at once.
+import * as THREE from 'three';
+import { makeCarMesh } from './vehicles.js';
+import { makePedMesh } from './pedestrians.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
+export function setupShot(game, name) {
+  const g = game;
+  const hooks = [];
+  if (name === 'cover') {
+    // Dusk chase down the Downtown avenue, heading west into the sunset:
+    // yellow sports car, 3 interceptors flanking and behind, 4 stars.
+    g.timeOfDay = 18.2;
+    g.giveCar('sports', 0xffd21f, 60, -81, -Math.PI / 2);
+    g.player.inCar.speed = 22;
+    g.police.addHeat(80);
+    g.hud.setMission('GHOST THE HEAT', 'Lose the cops — get your heat to zero.');
+    hooks.push(() => {
+      const car = g.player.inCar.mesh;
+      g.player.health = 100;
+      const bx = Math.sin(car.rotation.y);
+      const bz = Math.cos(car.rotation.y);
+      const rx = Math.cos(car.rotation.y);
+      const rz = -Math.sin(car.rotation.y);
+      const spots = [[6, 8], [6, -8], [10, 0]]; // [along, lateral]
+      g.police.interceptors.forEach((it, i) => {
+        const [along, lat] = spots[i % spots.length];
+        it.mesh.position.set(car.position.x + bx * along + rx * lat, 0, car.position.z + bz * along + rz * lat);
+        it.mesh.rotation.y = car.rotation.y;
+        it.speed = 22;
+      });
+      g.camera.position.set(
+        car.position.x - bx * 14 + rx * 3,
+        5.5,
+        car.position.z - bz * 14 + rz * 3,
+      );
+      g.camera.lookAt(car.position.x + bx * 12, 2, car.position.z + bz * 12);
+    });
+  } else if (name === 'shootout') {
+    // Night at the docks: Mara on foot, pistol out, Glass Kings ahead.
+    g.timeOfDay = 22.0;
+    g.player.pos.set(300, 0, 200);
+    g.player.yaw = Math.PI;
+    g.player.camYaw = Math.PI;
+    g.player.armed = true;
+    for (let k = 0; k < 4; k++) {
+      const mesh = makePedMesh(g.rng);
+      mesh.traverse((o) => {
+        if (o.isMesh && o.material && o.geometry && o.geometry.type === 'CylinderGeometry') {
+          o.material = new THREE.MeshStandardMaterial({ color: 0x7a2fd0, roughness: 0.85 });
+        }
+      });
+      mesh.position.set(288 + k * 8, 0, 190 - (k % 2) * 4);
+      mesh.rotation.y = 0;
+      g.scene.add(mesh);
+      g.shotExtras.push(mesh);
     }
+    // One rival down on the ground.
+    const down = makePedMesh(g.rng);
+    down.rotation.x = -Math.PI / 2;
+    down.position.set(297, 0.4, 194);
+    g.scene.add(down);
+    g.shotExtras.push(down);
+    // A tracer frozen mid-flight (bright cylinder, reads at night).
+    const tracer = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.07, 12, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffd21f }),
+    );
+    tracer.rotation.x = Math.PI / 2 - 0.12;
+    tracer.position.set(300, 1.5, 192);
+    g.scene.add(tracer);
+    g.shotExtras.push(tracer);
+    g.police.addHeat(40);
+    g.hud.setMission('DOCKSIDE SHOOTOUT', 'Clear the Glass Kings from the docks.');
+    hooks.push(() => {
+      g.player.health = 100;
+      // Shot mode never runs player.update, so sync the mesh by hand.
+      g.player.mesh.position.copy(g.player.pos);
+      g.player.mesh.rotation.y = g.player.yaw;
+      g.player.mesh.visible = true;
+      if (g.player.mesh.userData.gun) g.player.mesh.userData.gun.visible = true;
+      // Keep the chasing interceptors out of the frame for this shot.
+      g.police.interceptors.forEach((it) => { it.mesh.visible = false; });
+      g.camera.position.set(300, 4.0, 218);
+      g.camera.lookAt(300, 1.0, 188);
+    });
+  } else if (name === 'race') {
+    // Midday Street Kings race on the Foundry Row avenue: checkpoint 2,
+    // both rivals flanking the player down the road.
+    g.timeOfDay = 11.0;
+    g.giveCar('sports', 0xe01e2b, 150, 141, Math.PI / 2);
+    g.player.inCar.speed = 20;
+    const r1 = makeCarMesh('coupe', 0x1f8a4f);
+    r1.position.set(158, 0, 135);
+    r1.rotation.y = Math.PI / 2;
+    g.scene.add(r1);
+    g.shotExtras.push(r1);
+    const r2 = makeCarMesh('sedan', 0x8a2f6b);
+    r2.position.set(158, 0, 147);
+    r2.rotation.y = Math.PI / 2;
+    g.scene.add(r2);
+    g.shotExtras.push(r2);
+    g.setMarker(200, 141, 'CHECKPOINT 2/4');
+    g.hud.setMission('STREET KINGS', 'Checkpoint 2/4 — beat both rivals to the line.');
+    hooks.push(() => {
+      const car = g.player.inCar.mesh;
+      g.camera.position.set(car.position.x - 14, 6.5, car.position.z - 8);
+      g.camera.lookAt(185, 2, 141);
+    });
+  } else if (name === 'aerial') {
+    // Sunset over the whole city: stadium, plaza, beach, lighthouse.
+    // The default fog (far 700) swallows a high camera, so push it out.
+    g.timeOfDay = 17.6;
+    g.scene.fog.near = 200;
+    g.scene.fog.far = 1600;
+    hooks.push(() => {
+      g.camera.position.set(-40, 300, 330);
+      g.camera.lookAt(0, 0, -40);
+    });
   }
-  return Infinity;
-}
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
-}
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  return hooks;
 }
